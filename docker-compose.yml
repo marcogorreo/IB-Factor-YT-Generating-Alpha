@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: youtube
+      POSTGRES_PASSWORD: youtube
+      POSTGRES_DB: youtube_insights
+    # Porta host 5433 evita conflitti con un Postgres già in ascolto su 5432 (es. installazione locale Windows)
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

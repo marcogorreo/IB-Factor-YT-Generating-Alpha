@@ -4,8 +4,39 @@ import { config as loadEnv } from "dotenv";
 
 loadEnv({ path: path.resolve(__dirname, "../.env.local") });
 
+const gatewayOrigin =
+  process.env.API_GATEWAY_INTERNAL_URL ?? "http://127.0.0.1:4000";
+
+/** CDN YouTube: i.ytimg.com e i1…i9.ytimg.com per le anteprime */
+const ytimgHostnames = [
+  "i.ytimg.com",
+  ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `i${n}.ytimg.com`),
+];
+const ytimgRemotePatterns = ytimgHostnames.flatMap((hostname) => [
+  {
+    protocol: "https" as const,
+    hostname,
+    pathname: "/vi/**",
+  },
+  {
+    protocol: "https" as const,
+    hostname,
+    pathname: "/vi_webp/**",
+  },
+]);
+
 const nextConfig: NextConfig = {
-  /* config options here */
+  async rewrites() {
+    return [
+      {
+        source: "/api/backend/:path*",
+        destination: `${gatewayOrigin}/:path*`,
+      },
+    ];
+  },
+  images: {
+    remotePatterns: ytimgRemotePatterns,
+  },
 };
 
 export default nextConfig;

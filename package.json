@@ -6,10 +6,10 @@
     "backend/services/*"
   ],
   "scripts": {
-    "dev": "concurrently -n front,gateway,insights -c blue,cyan,magenta \"npm run dev -w frontend\" \"npm run dev -w @youtube-insights/api-gateway\" \"npm run dev -w @youtube-insights/insights-service\"",
+    "dev": "concurrently -n front,gateway,insights,youtube -c blue,cyan,magenta,green \"npm run dev -w frontend\" \"npm run dev -w @youtube-insights/api-gateway\" \"npm run dev -w @youtube-insights/insights-service\" \"npm run dev -w @youtube-insights/youtube-service\"",
     "dev:frontend": "npm run dev -w frontend",
-    "dev:backend": "concurrently -n gateway,insights -c cyan,magenta \"npm run dev -w @youtube-insights/api-gateway\" \"npm run dev -w @youtube-insights/insights-service\"",
-    "build": "npm run build -w frontend && npm run build -w @youtube-insights/api-gateway && npm run build -w @youtube-insights/insights-service",
+    "dev:backend": "concurrently -n gateway,insights,youtube -c cyan,magenta,green \"npm run dev -w @youtube-insights/api-gateway\" \"npm run dev -w @youtube-insights/insights-service\" \"npm run dev -w @youtube-insights/youtube-service\"",
+    "build": "npm run build -w frontend && npm run build -w @youtube-insights/api-gateway && npm run build -w @youtube-insights/insights-service && npm run build -w @youtube-insights/youtube-service",
     "lint": "npm run lint -w frontend"
   },
   "devDependencies": {
