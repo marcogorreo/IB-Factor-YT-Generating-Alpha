@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "IB Factor — YouTube Alpha Generator",
   description:
-    "Piattaforma per esplorare e sincronizzare i contenuti del canale YouTube Ingegneri in Borsa.",
+    "Video del canale Ingegneri in Borsa e analisi MRA (contesto, titoli, idee inverse).",
 };
 
 export default function RootLayout({
@@ -28,7 +28,7 @@ export default function RootLayout({
       lang="it"
       className={`${geistSans.variable} ${geistMono.variable} h-full scroll-smooth antialiased`}
     >
-      <body className="min-h-full font-sans">{children}</body>
+      <body className="flex min-h-dvh flex-col font-sans">{children}</body>
     </html>
   );
 }

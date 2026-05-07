@@ -26,6 +26,7 @@ const server = createServer(async (req, res) => {
     if (
       method !== "GET" &&
       method !== "POST" &&
+      method !== "DELETE" &&
       method !== "OPTIONS"
     ) {
       res.writeHead(405, { "content-type": "application/json" });
@@ -35,7 +36,7 @@ const server = createServer(async (req, res) => {
     if (method === "OPTIONS") {
       res.writeHead(204, {
         "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, POST, OPTIONS",
+        "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
         "access-control-allow-headers": "Content-Type",
       });
       res.end();

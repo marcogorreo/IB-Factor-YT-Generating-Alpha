@@ -1,19 +1,21 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 
 import { readApiJson } from "../lib/read-api-json";
+import { MraArchiveSection, useMraArchive } from "./MraArchiveTable";
 import { MraConfirmDialog } from "./MraConfirmDialog";
 
 const API = "/api/backend";
 
 const MRA_NAV_STORAGE = "mra_pending_nav";
 
-/** Tooltip sul pulsante: MRA + Soggetto Cramer */
+/** Cosa fa il pulsante «Esegui MRA» sul video */
 const MRA_TOOLTIP =
-  "Market Reverse-Analysis (MRA): si valuta il sentiment di un soggetto (il «Soggetto Cramer») e si impostano idee di operatività speculative il cui esito positivo sta in rapporto inverso al verificarsi delle sue previsioni — più le sue aspettative si sbagliano, più il setup può tendere a funzionare, secondo le regole che definirà il motore.";
+  "Apre il percorso per trascrivere il video e generare l’analisi MRA (contesto, titoli, idee in chiave inversa rispetto alle opinioni espresse). Solo uso informativo, non è consulenza finanziaria.";
 
 export type VideoItem = {
   video_id: string;
@@ -41,7 +43,7 @@ type Props = {
 
 type AppSection = "data-pool" | "mra";
 
-/** Traduce messaggi tecnici in linguaggio chiaro per chi non sviluppa software */
+/** Messaggi errore API resi leggibili */
 function humanizeError(raw: string, context: "list" | "refresh"): string {
   const s = raw.toLowerCase();
 
@@ -52,7 +54,7 @@ function humanizeError(raw: string, context: "list" | "refresh"): string {
     s.includes("gateway") ||
     s.includes("upstream_unavailable")
   ) {
-    return "Non riusciamo a collegarci al servizio che prepara i video. Di solito basta riavviare l’app o aspettare un minuto e riprovare. Se il problema resta, chi ha installato il programma sul PC può verificare che sia tutto avviato.";
+    return "Servizio temporaneamente non disponibile. Riprova tra un attimo.";
   }
 
   if (
@@ -62,7 +64,7 @@ function humanizeError(raw: string, context: "list" | "refresh"): string {
     s.includes("password") ||
     s.includes("connection refused")
   ) {
-    return "L’archivio dati non è raggiungibile (come un “magazzino” chiuso). Chi gestisce l’installazione deve avviare il database: di solito si usa il comando documentato nel progetto (Docker). Poi aggiorna di nuovo questa pagina.";
+    return "Non riusciamo a leggere l’archivio. Controlla che tutto sia avviato (come da guida di installazione) e riprova.";
   }
 
   if (
@@ -71,7 +73,7 @@ function humanizeError(raw: string, context: "list" | "refresh"): string {
     s.includes("fetch") ||
     s.includes("loadfailed")
   ) {
-    return "Controlla la connessione a Internet e che questa pagina sia aperta dall’indirizzo corretto. Poi prova a ricaricare.";
+    return "Connessione non riuscita. Controlla rete e indirizzo, poi ricarica la pagina.";
   }
 
   if (
@@ -79,32 +81,40 @@ function humanizeError(raw: string, context: "list" | "refresh"): string {
     s.includes("impossibile ottenere") ||
     s.includes("ytinitial")
   ) {
-    return "YouTube non ha risposto come previsto. Riprova tra poco: a volte i servizi esterni sono temporaneamente occupati.";
+    return "YouTube non ha risposto. Riprova tra poco.";
   }
 
   if (s.includes("superato il filtro") || s.includes("nessun video")) {
-    return "Non abbiamo trovato video che rispettano i criteri del canale dopo l’analisi. Prova di nuovo «Sincronizza» o controlla la configurazione del canale YouTube.";
+    return "Nessun video in elenco dopo l’aggiornamento. Prova di nuovo «Sincronizza canale».";
   }
 
   if (
     context === "refresh" &&
     (s.includes("500") || s.includes("youtube_service_error"))
   ) {
-    return "La sincronizzazione non è andata a buon fine. Riprova; se succede spesso, potrebbe essere un ostacolo temporaneo lato YouTube o connessione.";
+    return "Sincronizzazione non completata. Riprova; se succede spesso, controlla la connessione.";
   }
 
   if (/\b\d{3}\b/.test(raw) && raw.length < 80) {
-    return `Il server ha risposto con un errore (${raw.match(/\b\d{3}\b/)?.[0] ?? "?"}). Riprova più tardi o ricarica la pagina.`;
+    return `Qualcosa è andato storto (codice ${raw.match(/\b\d{3}\b/)?.[0] ?? "?"}). Riprova più tardi.`;
   }
 
   if (raw.length > 200) {
-    return "Si è verificato un errore tecnico. Riprova tra poco; spesso si risolve da solo. Se continua, segnala il messaggio a chi gestisce l’installazione.";
+    return "Si è verificato un errore. Riprova tra poco; se continua, segnala il messaggio ricevuto.";
   }
 
   return raw;
 }
 
 function MarketReverseAnalysisPanel() {
+  const {
+    items,
+    loading,
+    error,
+    deleteArchive,
+    deletingId,
+  } = useMraArchive();
+
   return (
     <div className="space-y-8">
       <section
@@ -124,43 +134,34 @@ function MarketReverseAnalysisPanel() {
         />
         <div className="relative">
           <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-violet-300/90">
-            In breve
+            Market Reverse-Analysis
           </p>
           <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white sm:text-3xl">
-            Cos&apos;è la MRA?
+            Analisi del canale
           </h2>
           <p className="mt-4 max-w-2xl text-sm leading-relaxed text-slate-300">
-            <strong className="font-semibold text-slate-100">
-              Market Reverse-Analysis (MRA)
-            </strong>{" "}
-            è un modo di ragionare sul mercato partendo da un personaggio o da
-            una voce che interpretiamo in modo ironico come{" "}
-            <span className="text-violet-200/95">«Soggetto Cramer»</span>: in
-            pratica osserviamo il suo umore sul mercato (sentiment) e costruiamo
-            ipotesi di operatività che tendono a guadagnare{" "}
-            <em className="text-cyan-200/90 not-italic">
-              quando le sue previsioni non si realizzano
-            </em>
-            , in misura legata a quanto i risultati si discostano da ciò che
-            diceva. Qui, quando sarà attivo il motore, ritroverai l&apos;esito
-            delle analisi avviate dal{" "}
-            <span className="font-medium text-cyan-200/90">Data Pool</span>.
+            Qui trovi le analisi già salvate: apri una scheda per leggere contesto,
+            previsioni ricavate dal video, titoli citati e le idee in senso inverso.
+            Per crearne una nuova vai al tab{" "}
+            <span className="font-medium text-cyan-200/90">Data Pool</span>, scegli
+            un video e premi{" "}
+            <span className="font-medium text-fuchsia-200/90">Esegui MRA</span>; a
+            fine analisi usa «Salva nell&apos;archivio».
           </p>
         </div>
       </section>
 
-      <section className="rounded-2xl border border-dashed border-white/12 bg-white/[0.02] px-6 py-16 text-center backdrop-blur-sm">
-        <p className="text-base font-medium text-slate-200">
-          Nessuna MRA in esecuzione
-        </p>
-        <p className="mx-auto mt-3 max-w-md text-sm leading-relaxed text-slate-500">
-          Quando il motore sarà collegato, qui vedrai stato, passi principali ed
-          esiti. Per avviare una MRA vai al{" "}
-          <span className="text-slate-400">Data Pool</span> e usa{" "}
-          <span className="font-medium text-fuchsia-300/90">Esegui MRA</span>{" "}
-          su un video.
-        </p>
-      </section>
+      <MraArchiveSection
+        headingId="dashboard-mra-archive"
+        title="Analisi salvate"
+        description="Apri una voce per il dettaglio: testo del video, riepilogo e grafici per titolo."
+        emptyHint="Nessuna analisi ancora. Dal tab Data Pool avvia Esegui MRA su un video e salva in archivio al termine."
+        items={items}
+        loading={loading}
+        error={error}
+        onDeleteArchive={deleteArchive}
+        deletingId={deletingId}
+      />
     </div>
   );
 }
@@ -326,9 +327,14 @@ export function VideoDashboard({ initialVideos }: Props) {
               YouTube Alpha Generator
             </h1>
             <p className="mt-1 max-w-xl text-xs text-slate-400">
-              Esplora e sincronizza rapidamente gli ultimi contenuti dal canale
-              YouTube configurato.
+              Video del canale Ingegneri in Borsa e analisi MRA.
             </p>
+            <Link
+              href="/"
+              className="mt-2 inline-flex text-xs font-medium text-slate-500 transition hover:text-cyan-400/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400"
+            >
+              Presentazione
+            </Link>
           </div>
           <button
             type="button"
@@ -401,8 +407,8 @@ export function VideoDashboard({ initialVideos }: Props) {
             </nav>
             <p className="max-w-md text-xs leading-relaxed text-slate-500">
               {section === "data-pool"
-                ? "Elenco storico e sincronizzazione dei video — punto di partenza per le MRA."
-                : "Vista dedicata al flusso Market Reverse-Analysis (MRA) e agli esiti (in arrivo)."}
+                ? "Elenco video: punto di partenza per MRA."
+                : "Analisi già salvate e come crearne di nuove."}
             </p>
           </div>
         </div>
@@ -432,11 +438,7 @@ export function VideoDashboard({ initialVideos }: Props) {
                     Ingegneri in Borsa
                   </h2>
                   <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-400">
-                    Qui trovi gli ultimi video salvati nel tuo archivio
-                    (<span className="text-slate-300">Data Pool</span>). Il
-                    pulsante in alto aggiorna l&apos;elenco con le novità dal
-                    canale YouTube (esclusi i contenuti del brand Ingegneria
-                    Italia).
+Ricorda: Antonino si sbaglia sempre.
                   </p>
                 </div>
                 <a
@@ -469,9 +471,7 @@ export function VideoDashboard({ initialVideos }: Props) {
                     {error}
                   </p>
                   <p className="mt-3 text-xs text-rose-200/70">
-                    Suggerimento: prova a ricaricare la pagina o riprova tra un
-                    minuto. Se l&apos;errore compare spesso, avvisa chi ha
-                    predisposto l&apos;installazione sul computer.
+                    Ricarica la pagina o riprova tra un minuto.
                   </p>
                 </div>
               </div>
@@ -483,15 +483,13 @@ export function VideoDashboard({ initialVideos }: Props) {
                   Ancora nessun video da mostrare
                 </p>
                 <p className="mx-auto mt-3 max-w-lg text-sm leading-relaxed text-slate-400">
-                  Usa il pulsante{" "}
+                  Tocca{" "}
                   <strong className="text-slate-300">Sincronizza canale</strong>{" "}
-                  in alto per scaricare gli ultimi video dal canale. La prima
-                  volta può richiedere alcuni secondi.
+                  per caricare l&apos;elenco dalla prima volta.
                 </p>
                 <p className="mx-auto mt-6 text-xs text-slate-500">
-                  Se dopo la sincronizzazione non compare nulla, potrebbe mancare
-                  l&apos;archivio dati sul PC: in quel caso serve l&apos;aiuto
-                  di chi ha installato l&apos;applicazione.
+                  Se dopo la sincronizzazione non compare nulla, l&apos;archivio
+                  potrebbe non essere disponibile.
                 </p>
               </div>
             )}
@@ -568,9 +566,6 @@ export function VideoDashboard({ initialVideos }: Props) {
                           </div>
 
                           <div className="flex flex-col gap-3 border-t border-white/10 pt-4 sm:flex-row sm:items-center sm:justify-between">
-                            <p className="text-xs text-slate-500">
-                              Titolo e anteprima aprono il video su YouTube.
-                            </p>
                             <div className="flex shrink-0 flex-wrap items-center justify-start gap-2 sm:justify-end">
                               <span className="group/mra relative z-[120] inline-flex">
                                 <button

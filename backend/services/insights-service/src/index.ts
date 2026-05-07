@@ -4,7 +4,16 @@ import type { IncomingMessage } from "node:http";
 import { createServer } from "node:http";
 import { config as loadEnv } from "dotenv";
 
-import { ensureMraTranscriptSchema, getPool, upsertTranscript } from "./db/pool.js";
+import {
+  deleteMraAnalysisArchiveById,
+  ensureMraAnalysisArchiveSchema,
+  ensureMraTranscriptSchema,
+  getMraAnalysisArchiveById,
+  getPool,
+  insertMraAnalysisArchive,
+  listMraAnalysisArchiveSummaries,
+  upsertTranscript,
+} from "./db/pool.js";
 import {
   anthropicChat,
   getAnthropicStatus,
@@ -25,8 +34,9 @@ async function initDb(): Promise<void> {
   try {
     const pool = getPool();
     await ensureMraTranscriptSchema(pool);
+    await ensureMraAnalysisArchiveSchema(pool);
     dbReady = true;
-    console.log("[insights-service] schema mra_transcripts ok");
+    console.log("[insights-service] schema mra_transcripts + mra_analysis_archive ok");
   } catch (e) {
     console.warn(
       "[insights-service] DATABASE_URL assente o schema fallito — MRA trascrizioni disabilitate:",
@@ -82,8 +92,61 @@ function parseTranscribeBody(raw: unknown): { video_id: string } {
   return { video_id: o.video_id.trim() };
 }
 
+function parseArchiveBody(
+  raw: unknown,
+): {
+  video_id: string;
+  video_title: string;
+  transcript: string;
+  contesto_generale: string;
+  previsioni_opinioni: string;
+  titoli_coinvolti: string;
+  operazioni_inverse: string;
+} {
+  if (!raw || typeof raw !== "object") {
+    const e = new Error("Body JSON richiesto");
+    (e as Error & { statusCode?: number }).statusCode = 400;
+    throw e;
+  }
+  const o = raw as Record<string, unknown>;
+  const need = [
+    "video_id",
+    "video_title",
+    "transcript",
+    "contesto_generale",
+    "previsioni_opinioni",
+    "titoli_coinvolti",
+    "operazioni_inverse",
+  ] as const;
+  const out: Record<string, string> = {};
+  for (const k of need) {
+    const v = o[k];
+    if (typeof v !== "string") {
+      const e = new Error(`Campo "${k}" deve essere una stringa`);
+      (e as Error & { statusCode?: number }).statusCode = 400;
+      throw e;
+    }
+    out[k] = v;
+  }
+  if (!out.video_id.trim()) {
+    const e = new Error('Campo "video_id" non può essere vuoto');
+    (e as Error & { statusCode?: number }).statusCode = 400;
+    throw e;
+  }
+  return {
+    video_id: out.video_id.trim(),
+    video_title: out.video_title,
+    transcript: out.transcript,
+    contesto_generale: out.contesto_generale,
+    previsioni_opinioni: out.previsioni_opinioni,
+    titoli_coinvolti: out.titoli_coinvolti,
+    operazioni_inverse: out.operazioni_inverse,
+  };
+}
+
 const server = createServer(async (req, res) => {
   const url = req.url ?? "/";
+  const pathname = url.split("?")[0].replace(/\/+$/, "") || "/";
 
   if (req.method === "GET" && url === "/health") {
     json(res, 200, {
@@ -247,6 +310,117 @@ const server = createServer(async (req, res) => {
               : code === 502
                 ? "llm_upstream"
                 : "analyze_error",
+        message: err.message,
+      });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && pathname.startsWith("/insights/mra/archive")) {
+    if (!dbReady) {
+      json(res, 503, {
+        ok: false,
+        error: "database_unavailable",
+        message: "Database non disponibile.",
+      });
+      return;
+    }
+    try {
+      const pool = getPool();
+      const listRe = /^\/insights\/mra\/archive$/;
+      const itemRe = /^\/insights\/mra\/archive\/(\d+)$/;
+      if (listRe.test(pathname)) {
+        const items = await listMraAnalysisArchiveSummaries(pool);
+        json(res, 200, { ok: true, items });
+        return;
+      }
+      const detailMatch = pathname.match(itemRe);
+      if (detailMatch) {
+        const idNum = Number(detailMatch[1]);
+        const item = await getMraAnalysisArchiveById(pool, idNum);
+        if (!item) {
+          json(res, 404, {
+            ok: false,
+            error: "not_found",
+            message: "Analisi non trovata.",
+          });
+          return;
+        }
+        json(res, 200, { ok: true, item });
+        return;
+      }
+      json(res, 400, { ok: false, error: "invalid_path" });
+    } catch (e: unknown) {
+      json(res, 500, {
+        ok: false,
+        message: e instanceof Error ? e.message : "Errore lettura archivio",
+      });
+    }
+    return;
+  }
+
+  if (req.method === "DELETE" && pathname.startsWith("/insights/mra/archive/")) {
+    if (!dbReady) {
+      json(res, 503, {
+        ok: false,
+        error: "database_unavailable",
+        message: "Database non disponibile.",
+      });
+      return;
+    }
+    const itemRe = /^\/insights\/mra\/archive\/(\d+)$/;
+    const delMatch = pathname.match(itemRe);
+    if (!delMatch) {
+      json(res, 400, { ok: false, error: "invalid_path" });
+      return;
+    }
+    try {
+      const idNum = Number(delMatch[1]);
+      const pool = getPool();
+      const removed = await deleteMraAnalysisArchiveById(pool, idNum);
+      if (!removed) {
+        json(res, 404, {
+          ok: false,
+          error: "not_found",
+          message: "Analisi non trovata o già eliminata.",
+        });
+        return;
+      }
+      json(res, 200, { ok: true, id: idNum });
+    } catch (e: unknown) {
+      json(res, 500, {
+        ok: false,
+        message:
+          e instanceof Error ? e.message : "Errore durante l'eliminazione.",
+      });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url === "/insights/mra/archive") {
+    if (!dbReady) {
+      json(res, 503, {
+        ok: false,
+        error: "database_unavailable",
+        message: "Database non disponibile.",
+      });
+      return;
+    }
+    try {
+      const raw = await readJsonBody(req);
+      const row = parseArchiveBody(raw);
+      const pool = getPool();
+      const id = await insertMraAnalysisArchive(pool, row);
+      json(res, 200, { ok: true, id });
+    } catch (e: unknown) {
+      if (e instanceof SyntaxError) {
+        json(res, 400, { ok: false, error: "invalid_json", message: e.message });
+        return;
+      }
+      const err = e as Error & { statusCode?: number };
+      const code = err.statusCode ?? 500;
+      json(res, code, {
+        ok: false,
         message: err.message,
       });
     }

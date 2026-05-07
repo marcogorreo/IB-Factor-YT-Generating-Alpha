@@ -2,11 +2,18 @@
 
 import Image from "next/image";
 import Link from "next/link";
+
+import { DASHBOARD_PATH } from "../lib/routes";
 import { readApiJson } from "../lib/read-api-json";
+import {
+  MraArchiveSection,
+  useMraArchive,
+} from "./MraArchiveTable";
 import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -50,6 +57,10 @@ type TranscriptResponse = {
   message?: string;
   error?: string;
 };
+
+type TranscriptFetchResult =
+  | { ok: true }
+  | { ok: false; message: string };
 
 /** Badge vetro / trasparente coerente con il tema */
 function GlassBadge({
@@ -155,6 +166,34 @@ function formatIsoDateBadge(iso: string | undefined, style: "short" | "medium") 
   });
 }
 
+/** Testo completo per colonna archivio DB (previsioni come elenco numerato). */
+function formatPrevisioniForArchive(report: MraAgentReport): string {
+  const arr = report.previsioni_principali ?? [];
+  if (!arr.length) return "";
+  return arr.map((p, i) => `${i + 1}. ${p}`).join("\n\n");
+}
+
+function formatTitoliForArchive(report: MraAgentReport): string {
+  return (report.titoli_coinvolti ?? []).join("\n");
+}
+
+const ARCHIVE_TICKER_SEP = "\n\n────────────────\n\n";
+
+/** Tutti i blocchi per ticker, testo integrale come in UI. */
+function formatOperazioniInverseForArchive(report: MraAgentReport): string {
+  const rows = report.per_ticker ?? [];
+  if (!rows.length) return "";
+  return rows
+    .map(
+      (row) =>
+        `${row.ticker}\n` +
+        `Orientamento del soggetto: ${row.orientamento_del_soggetto}\n` +
+        `Operazioni suggerite (inverso MRA): ${row.operazioni_suggerite}\n` +
+        `Motivazione: ${row.motivazione}`,
+    )
+    .join(ARCHIVE_TICKER_SEP);
+}
+
 type Props = {
   videoId: string;
 };
@@ -177,6 +216,28 @@ export function MraFlowClient({ videoId }: Props) {
   } | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  /** Workflow agent: da click fino a fine (include attesa trascrizione) */
+  const [runWorkflowBusy, setRunWorkflowBusy] = useState(false);
+
+  const [saveArchiveBusy, setSaveArchiveBusy] = useState(false);
+  const [saveArchiveMsg, setSaveArchiveMsg] = useState<string | null>(null);
+
+  const {
+    items: archiveItems,
+    loading: archiveLoading,
+    error: archiveError,
+    reload: reloadArchive,
+    deleteArchive,
+    deletingId: archiveDeletingId,
+  } = useMraArchive();
+
+  /** Step 1: chiuso di default */
+  const [step1Open, setStep1Open] = useState(false);
+  const transcriptFetchRef = useRef<Promise<TranscriptFetchResult> | null>(null);
+  const transcriptRef = useRef(transcript);
+  const loadingTRef = useRef(loadingT);
+  transcriptRef.current = transcript;
+  loadingTRef.current = loadingT;
 
   useEffect(() => {
     try {
@@ -193,52 +254,121 @@ export function MraFlowClient({ videoId }: Props) {
     }
   }, [videoId]);
 
-  const fetchTranscript = useCallback(async () => {
-    setLoadingT(true);
-    setLoadError(null);
-    try {
-      const res = await fetch(
-        `${API}/insights/mra/transcript/${encodeURIComponent(videoId)}`,
-        { cache: "no-store" },
-      );
-      const data = await readApiJson<TranscriptResponse>(res);
-      if (!res.ok || !data.transcript) {
-        if (!res.ok && typeof data.message === "string") {
-          throw new Error(data.message);
-        }
-        throw new Error(
-          res.status === 404
-            ? "Trascrizione non trovata. Torna al Data Pool ed esegui di nuovo «Esegui MRA»."
-            : "Impossibile caricare la trascrizione.",
-        );
-      }
-      setTranscript(data.transcript);
-      setLang(data.language ?? null);
-      setTranscriptUpdatedAt(
-        typeof data.updated_at === "string" ? data.updated_at : null,
-      );
-      setChars(
-        typeof data.char_count === "number"
-          ? data.char_count
-          : [...data.transcript].length,
-      );
-    } catch (e: unknown) {
-      setLoadError(e instanceof Error ? e.message : "Errore caricamento");
-    } finally {
-      setLoadingT(false);
+  const fetchTranscript = useCallback(async (): Promise<TranscriptFetchResult> => {
+    if (transcriptRef.current && !loadingTRef.current) {
+      return { ok: true };
     }
+    if (transcriptFetchRef.current) {
+      return transcriptFetchRef.current;
+    }
+
+    const p = (async (): Promise<TranscriptFetchResult> => {
+      setLoadingT(true);
+      setLoadError(null);
+      try {
+        const res = await fetch(
+          `${API}/insights/mra/transcript/${encodeURIComponent(videoId)}`,
+          { cache: "no-store" },
+        );
+        const data = await readApiJson<TranscriptResponse>(res);
+        if (!res.ok || !data.transcript) {
+          if (!res.ok && typeof data.message === "string") {
+            const msg = data.message;
+            setLoadError(msg);
+            return { ok: false, message: msg };
+          }
+          const fallback =
+            res.status === 404
+            ? "Trascrizione non trovata. Torna all'app, scegli il video dal Data Pool e usa Esegui MRA."
+              : "Impossibile caricare la trascrizione.";
+          setLoadError(fallback);
+          return { ok: false, message: fallback };
+        }
+        setTranscript(data.transcript);
+        setLang(data.language ?? null);
+        setTranscriptUpdatedAt(
+          typeof data.updated_at === "string" ? data.updated_at : null,
+        );
+        setChars(
+          typeof data.char_count === "number"
+            ? data.char_count
+            : [...data.transcript].length,
+        );
+        return { ok: true };
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Errore caricamento";
+        setLoadError(msg);
+        return { ok: false, message: msg };
+      } finally {
+        setLoadingT(false);
+      }
+    })().finally(() => {
+      transcriptFetchRef.current = null;
+    });
+
+    transcriptFetchRef.current = p;
+    return p;
   }, [videoId]);
 
   useEffect(() => {
     void fetchTranscript();
-  }, [fetchTranscript]);
+  }, [videoId, fetchTranscript]);
+
+  const saveToArchive = async () => {
+    if (!mraReport || transcript == null) return;
+    setSaveArchiveBusy(true);
+    setSaveArchiveMsg(null);
+    try {
+      const res = await fetch(`${API}/insights/mra/archive`, {
+        method: "POST",
+        headers: { "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          video_id: videoId,
+          video_title: meta?.title ?? `Video ${videoId}`,
+          transcript,
+          contesto_generale: mraReport.contesto_generale,
+          previsioni_opinioni: formatPrevisioniForArchive(mraReport),
+          titoli_coinvolti: formatTitoliForArchive(mraReport),
+          operazioni_inverse: formatOperazioniInverseForArchive(mraReport),
+        }),
+      });
+      const data = await readApiJson<{
+        ok?: boolean;
+        id?: number;
+        message?: string;
+      }>(res);
+      if (!res.ok || !data.ok) {
+        throw new Error(data.message ?? "Salvataggio non riuscito.");
+      }
+      setSaveArchiveMsg(
+        typeof data.id === "number"
+          ? `Salvato come riga #${data.id}.`
+          : "Salvato nell'archivio.",
+      );
+      await reloadArchive();
+    } catch (e: unknown) {
+      setSaveArchiveMsg(
+        e instanceof Error ? e.message : "Errore durante il salvataggio.",
+      );
+    } finally {
+      setSaveArchiveBusy(false);
+    }
+  };
 
   const runAnalysis = async () => {
+    setStep1Open(true);
     setAnalyzeError(null);
-    setAnalyzing(true);
     setMraReport(null);
     setAnalysisMeta(null);
+    setRunWorkflowBusy(true);
+    setAnalyzing(false);
     try {
+      const tx = await fetchTranscript();
+      if (!tx.ok) {
+        setAnalyzeError(tx.message);
+        return;
+      }
+      setAnalyzing(true);
       const res = await fetch(`${API}/insights/mra/analyze`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -265,6 +395,7 @@ export function MraFlowClient({ videoId }: Props) {
       );
     } finally {
       setAnalyzing(false);
+      setRunWorkflowBusy(false);
     }
   };
 
@@ -294,53 +425,136 @@ export function MraFlowClient({ videoId }: Props) {
     "medium",
   );
 
+  const step1Summary = useMemo(() => {
+    if (loadingT) return "Caricamento in corso…";
+    if (loadError)
+      return loadError.length > 72 ? `${loadError.slice(0, 72)}…` : loadError;
+    if (transcript && chars != null) {
+      return `Trascrizione pronta · ${chars.toLocaleString("it-IT")} caratteri${
+        lang ? ` · ${lang.toUpperCase()}` : ""
+      }`;
+    }
+    return "In attesa dei dati…";
+  }, [loadingT, loadError, transcript, chars, lang]);
+
+  const transcriptStepDone =
+    !loadingT && Boolean(transcript) && loadError == null;
+  const analysisStepDone = Boolean(mraReport);
+
   return (
     <div className="mx-auto w-full max-w-4xl flex-1 px-4 py-8 sm:px-6 sm:py-10">
       <nav className="mb-8">
         <Link
-          href="/"
+          href={DASHBOARD_PATH}
           className="inline-flex items-center gap-2 text-sm font-medium text-cyan-400/90 transition hover:text-cyan-300"
         >
-          ← Torna al Data Pool
+          ← Torna all&apos;app
         </Link>
       </nav>
+
+      <section
+        className="mb-8 overflow-hidden rounded-2xl border border-fuchsia-500/25 bg-gradient-to-br from-fuchsia-950/35 via-slate-950/40 to-slate-950/90 shadow-xl backdrop-blur-sm"
+        aria-labelledby="cramer-subject-heading"
+      >
+        <div className="flex flex-col gap-5 p-5 sm:flex-row sm:items-start sm:gap-6 sm:p-6">
+          <div className="relative mx-auto size-28 shrink-0 overflow-hidden rounded-2xl border border-white/12 bg-slate-900 shadow-lg sm:mx-0 sm:size-32">
+            <Image
+              src="/images/ib_profilepic.jpg"
+              alt="Due giovani in camicia blu e nera, schiena contro schiena, su sfondo arancione"
+              fill
+              className="object-cover"
+              sizes="128px"
+              priority
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-fuchsia-300/90">
+              Di cosa parliamo
+            </p>
+            <h2
+              id="cramer-subject-heading"
+              className="mt-1 text-lg font-semibold tracking-tight text-white sm:text-xl"
+            >
+              Ingegneri in Borsa · Antonino e Mattia
+            </h2>
+            <p className="mt-3 text-sm leading-relaxed text-slate-300/95">
+              Le analisi si riferiscono a ciò che dicono in video sui mercati e
+              sui titoli. La MRA propone idee in <em className="not-italic text-slate-200">senso inverso</em> rispetto a
+              quelle opinioni: materiale{" "}
+              <span className="text-slate-200">solo informativo e didattico</span>
+              , non consulenza finanziaria.
+            </p>
+          </div>
+        </div>
+      </section>
 
       <header className="mb-8 space-y-2">
         <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-fuchsia-400/90">
           Market Reverse-Analysis
         </p>
         <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">
-          Flusso MRA
+          La tua analisi
         </h1>
         <p className="max-w-2xl text-sm text-slate-400">
-          Passo 1: trascrizione dal video. Passo 2: l&apos;agent MRA produce un file
-          JSON con contesto, previsioni del soggetto, ticker e operatività inversa
-          (framework educativo, non consulenza finanziaria).
+          Prima serve il testo del video; poi puoi generare il riepilogo (contesto,
+          titoli citati, idee in senso inverso).
         </p>
       </header>
 
-      <ol className="mb-10 flex flex-wrap gap-3 text-sm">
-        <li className="inline-flex items-center gap-2 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-4 py-2 font-medium text-emerald-100">
+      <ol className="mb-10 flex flex-wrap gap-3 text-sm" aria-label="Stato del flusso">
+        <li
+          className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 font-medium ${
+            transcriptStepDone
+              ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-100"
+              : "border-white/12 bg-white/[0.04] text-slate-400"
+          }`}
+        >
           <span
-            className="flex size-6 items-center justify-center rounded-full bg-emerald-500/30 text-xs"
+            className={`flex size-6 items-center justify-center rounded-full text-xs ${
+              transcriptStepDone
+                ? "bg-emerald-500/30 text-emerald-50"
+                : loadingT
+                  ? "bg-white/10"
+                  : "bg-white/10 text-slate-300"
+            }`}
             aria-hidden
           >
-            ✓
+            {transcriptStepDone ? (
+              "✓"
+            ) : loadingT ? (
+              <span className="size-3.5 animate-spin rounded-full border-2 border-emerald-500/25 border-t-emerald-400" />
+            ) : (
+              "1"
+            )}
           </span>
           Trascrizione
         </li>
         <li
           className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 font-medium ${
-            mraReport
+            analysisStepDone
               ? "border-violet-500/35 bg-violet-500/10 text-violet-100"
-              : "border-white/12 bg-white/[0.04] text-slate-400"
+              : analyzing
+                ? "border-violet-500/25 bg-violet-500/[0.06] text-violet-200/80"
+                : "border-white/12 bg-white/[0.04] text-slate-400"
           }`}
         >
           <span
-            className="flex size-6 items-center justify-center rounded-full bg-white/10 text-xs text-slate-300"
+            className={`flex size-6 items-center justify-center rounded-full text-xs ${
+              analysisStepDone
+                ? "bg-violet-500/30 text-violet-50"
+                : analyzing
+                  ? "bg-violet-500/20"
+                  : "bg-white/10 text-slate-300"
+            }`}
             aria-hidden
           >
-            2
+            {analysisStepDone ? (
+              "✓"
+            ) : analyzing ? (
+              <span className="size-3.5 animate-spin rounded-full border-2 border-violet-400/30 border-t-violet-300" />
+            ) : (
+              "2"
+            )}
           </span>
           Analisi
         </li>
@@ -381,164 +595,227 @@ export function MraFlowClient({ videoId }: Props) {
         </div>
       </section>
 
-      <section className="mb-10">
-        <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-          <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-500">
-            Passo 1 — Trascrizione
-          </h3>
-          <p className="text-xs text-slate-600">
-            Testo dai sottotitoli YouTube · frasi ordinate in paragrafi
-          </p>
-        </div>
-        {loadingT && (
-          <div className="flex items-center gap-2 text-sm text-slate-400">
+      <section className="mb-10 overflow-hidden rounded-2xl border border-white/10 bg-white/[0.03] shadow-lg backdrop-blur-sm">
+        <button
+          type="button"
+          onClick={() => setStep1Open((o) => !o)}
+          aria-expanded={step1Open}
+          className="flex w-full items-center gap-3 px-4 py-4 text-left transition hover:bg-white/[0.04] sm:px-5"
+        >
+          <span
+            className={`mt-0.5 shrink-0 text-slate-500 transition-transform ${
+              step1Open ? "rotate-180" : ""
+            }`}
+            aria-hidden
+          >
+            <svg
+              className="size-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M19 9l-7 7-7-7"
+              />
+            </svg>
+          </span>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-400">
+              Passo 1 — Trascrizione
+            </h3>
+            <p className="mt-0.5 truncate text-xs text-slate-500 sm:whitespace-normal sm:leading-snug">
+              {step1Summary}
+            </p>
+          </div>
+          {loadingT ? (
             <span
-              className="size-4 animate-spin rounded-full border-2 border-cyan-500/20 border-t-cyan-400"
+              className="size-4 shrink-0 animate-spin rounded-full border-2 border-cyan-500/20 border-t-cyan-400"
               aria-hidden
             />
-            Caricamento…
-          </div>
-        )}
-        {loadError && (
-          <p
-            className="rounded-xl border border-rose-500/30 bg-rose-950/40 px-4 py-3 text-sm text-rose-100"
-            role="alert"
-          >
-            {loadError}
-          </p>
-        )}
-        {!loadingT && transcript && (
-          <div className="overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-b from-white/[0.07] via-slate-950/40 to-slate-950/95 shadow-2xl shadow-black/40 ring-1 ring-white/[0.06]">
-            <div className="border-b border-white/[0.08] bg-gradient-to-r from-slate-900/70 via-slate-900/40 to-transparent px-5 py-4 sm:px-6">
-              <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">
-                Metadati
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {publishedLabel ? (
-                  <GlassBadge
-                    tone="cyan"
-                    icon={
-                      <svg
-                        className="size-3.5 text-cyan-300/80"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                        aria-hidden
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
-                        />
-                      </svg>
-                    }
-                  >
-                    Video · {publishedLabel}
-                  </GlassBadge>
-                ) : null}
-                {updatedLabel ? (
-                  <GlassBadge
-                    tone="amber"
-                    icon={
-                      <svg
-                        className="size-3.5 text-amber-200/70"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                        aria-hidden
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
-                        />
-                      </svg>
-                    }
-                  >
-                    Trascrizione salvata · {updatedLabel}
-                  </GlassBadge>
-                ) : null}
-                {lang ? (
-                  <GlassBadge
-                    tone="neutral"
-                    icon={
-                      <span className="text-[10px] opacity-90" aria-hidden>
-                        Aa
-                      </span>
-                    }
-                  >
-                    Lingua {lang.toUpperCase()}
-                  </GlassBadge>
-                ) : null}
-                {chars != null ? (
-                  <GlassBadge tone="neutral">
-                    {chars.toLocaleString("it-IT")} caratteri
-                  </GlassBadge>
-                ) : null}
-              </div>
-            </div>
+          ) : null}
+        </button>
 
-            <div
-              className="max-h-[min(58vh,560px)] overflow-y-auto px-5 py-6 sm:px-7 sm:py-7 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/12 [&::-webkit-scrollbar-thumb]:hover:bg-white/18 [&::-webkit-scrollbar-track]:bg-transparent"
-              tabIndex={0}
-            >
-              <article
-                className="mx-auto max-w-prose space-y-5 border-l-2 border-cyan-400/15 pl-5 sm:border-cyan-400/25 sm:pl-6"
-                aria-label="Testo della trascrizione"
+        {step1Open ? (
+          <div className="space-y-4 border-t border-white/10 px-4 pb-5 pt-3 sm:px-5">
+            <p className="text-xs text-slate-600">
+              Dal video (sottotitoli), suddiviso in paragrafi
+            </p>
+            {loadingT && (
+              <div className="flex items-center gap-2 text-sm text-slate-400">
+                <span
+                  className="size-4 animate-spin rounded-full border-2 border-cyan-500/20 border-t-cyan-400"
+                  aria-hidden
+                />
+                Caricamento trascrizione…
+              </div>
+            )}
+            {loadError && (
+              <p
+                className="rounded-xl border border-rose-500/30 bg-rose-950/40 px-4 py-3 text-sm text-rose-100"
+                role="alert"
               >
-                {transcriptBlocks.map((block, i) => (
-                  <p
-                    key={i}
-                    className="text-[15px] leading-[1.78] tracking-[0.01em] text-slate-200/95"
-                  >
-                    {block}
+                {loadError}
+              </p>
+            )}
+            {!loadingT && transcript && (
+              <div className="overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-b from-white/[0.07] via-slate-950/40 to-slate-950/95 shadow-2xl shadow-black/40 ring-1 ring-white/[0.06]">
+                <div className="border-b border-white/[0.08] bg-gradient-to-r from-slate-900/70 via-slate-900/40 to-transparent px-5 py-4 sm:px-6">
+                  <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">
+                    Info
                   </p>
-                ))}
-              </article>
-            </div>
+                  <div className="flex flex-wrap gap-2">
+                    {publishedLabel ? (
+                      <GlassBadge
+                        tone="cyan"
+                        icon={
+                          <svg
+                            className="size-3.5 text-cyan-300/80"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                            aria-hidden
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"
+                            />
+                          </svg>
+                        }
+                      >
+                        Video · {publishedLabel}
+                      </GlassBadge>
+                    ) : null}
+                    {updatedLabel ? (
+                      <GlassBadge
+                        tone="amber"
+                        icon={
+                          <svg
+                            className="size-3.5 text-amber-200/70"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                            strokeWidth={2}
+                            aria-hidden
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                            />
+                          </svg>
+                        }
+                      >
+                        Trascrizione salvata · {updatedLabel}
+                      </GlassBadge>
+                    ) : null}
+                    {lang ? (
+                      <GlassBadge
+                        tone="neutral"
+                        icon={
+                          <span className="text-[10px] opacity-90" aria-hidden>
+                            Aa
+                          </span>
+                        }
+                      >
+                        Lingua {lang.toUpperCase()}
+                      </GlassBadge>
+                    ) : null}
+                    {chars != null ? (
+                      <GlassBadge tone="neutral">
+                        {chars.toLocaleString("it-IT")} caratteri
+                      </GlassBadge>
+                    ) : null}
+                  </div>
+                </div>
+
+                <div
+                  className="max-h-[min(58vh,560px)] overflow-y-auto px-5 py-6 sm:px-7 sm:py-7 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/12 [&::-webkit-scrollbar-thumb]:hover:bg-white/18 [&::-webkit-scrollbar-track]:bg-transparent"
+                  tabIndex={0}
+                >
+                  <article
+                    className="mx-auto max-w-prose space-y-5 border-l-2 border-cyan-400/15 pl-5 sm:border-cyan-400/25 sm:pl-6"
+                    aria-label="Testo della trascrizione"
+                  >
+                    {transcriptBlocks.map((block, i) => (
+                      <p
+                        key={i}
+                        className="text-[15px] leading-[1.78] tracking-[0.01em] text-slate-200/95"
+                      >
+                        {block}
+                      </p>
+                    ))}
+                  </article>
+                </div>
+              </div>
+            )}
           </div>
-        )}
+        ) : null}
       </section>
 
       <section className="rounded-2xl border border-violet-500/25 bg-violet-950/20 p-6 shadow-lg backdrop-blur-sm">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-violet-300/90">
-          Passo 2 — Agent MRA (output JSON)
+          Passo 2 — Analisi
         </h3>
         <p className="mb-6 text-sm leading-relaxed text-slate-400">
-          L&apos;agent analizza la trascrizione e restituisce un unico oggetto JSON:
-          contesto, previsioni/opinioni del soggetto, ticker coinvolti e per ciascuno
-          operazioni concettualmente inverse (logica MRA) con motivazione. Richiede
-          chiave Anthropic in <code className="text-slate-300">.env.local</code>.
+          Genera il riepilogo a partire dalla trascrizione: contesto, punti citati nel
+          video, titoli e idee formulate «al contrario» rispetto a quelle opinioni.
         </p>
         <div className="flex flex-wrap gap-3">
           <button
             type="button"
-            disabled={Boolean(!transcript || loadingT || analyzing)}
+            disabled={runWorkflowBusy}
             onClick={() => void runAnalysis()}
             className="inline-flex h-11 flex-1 items-center justify-center rounded-xl bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500 px-6 text-sm font-semibold text-white shadow-lg shadow-violet-500/25 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45 min-[380px]:flex-initial"
           >
-            {analyzing ? (
+            {runWorkflowBusy ? (
               <span className="flex items-center gap-2">
                 <span
                   className="size-4 animate-spin rounded-full border-2 border-white/30 border-t-white"
                   aria-hidden
                 />
-                Generazione in corso…
+                {loadingT
+                  ? "Caricamento trascrizione…"
+                  : analyzing
+                    ? "Generazione analisi…"
+                    : "Avvio…"}
               </span>
             ) : (
-              "Esegui agent MRA"
+              "Genera analisi"
             )}
           </button>
           {mraReport ? (
-            <button
-              type="button"
-              onClick={downloadMraJson}
-              className="inline-flex h-11 items-center justify-center rounded-xl border border-white/15 bg-white/[0.06] px-5 text-sm font-semibold text-slate-100 backdrop-blur-sm transition hover:bg-white/[0.1]"
-            >
-              Scarica JSON
-            </button>
+            <>
+              <button
+                type="button"
+                disabled={saveArchiveBusy || transcript == null}
+                onClick={() => void saveToArchive()}
+                className="inline-flex h-11 items-center justify-center rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-5 text-sm font-semibold text-emerald-100 backdrop-blur-sm transition hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {saveArchiveBusy ? (
+                  <span className="flex items-center gap-2">
+                    <span
+                      className="size-4 animate-spin rounded-full border-2 border-emerald-400/30 border-t-emerald-200"
+                      aria-hidden
+                    />
+                    Salvataggio…
+                  </span>
+                ) : (
+                  "Salva nell'archivio"
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={downloadMraJson}
+                className="inline-flex h-11 items-center justify-center rounded-xl border border-white/15 bg-white/[0.06] px-5 text-sm font-semibold text-slate-100 backdrop-blur-sm transition hover:bg-white/[0.1]"
+              >
+                Scarica risultato (JSON)
+              </button>
+            </>
           ) : null}
         </div>
         {analyzeError && (
@@ -547,6 +824,18 @@ export function MraFlowClient({ videoId }: Props) {
             role="alert"
           >
             {analyzeError}
+          </p>
+        )}
+        {saveArchiveMsg && (
+          <p
+            className={`mt-3 rounded-lg border px-3 py-2 text-sm ${
+              saveArchiveMsg.startsWith("Salvato")
+                ? "border-emerald-500/30 bg-emerald-950/35 text-emerald-100"
+                : "border-rose-500/30 bg-rose-950/40 text-rose-100"
+            }`}
+            role="status"
+          >
+            {saveArchiveMsg}
           </p>
         )}
         {mraReport && (
@@ -562,14 +851,9 @@ export function MraFlowClient({ videoId }: Props) {
                   {new Date(mraReport.generato_il).toLocaleString("it-IT")}
                 </span>
               )}
-              {analysisMeta?.model && (
-                <span className="rounded-full bg-white/10 px-2 py-0.5">
-                  Modello: {analysisMeta.model}
-                </span>
-              )}
               {analysisMeta?.truncated && (
                 <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-amber-200/90">
-                  Trascrizione troncata per limite contesto
+                  Usati i primi minuti di trascrizione (testo molto lungo)
                 </span>
               )}
             </div>
@@ -585,14 +869,14 @@ export function MraFlowClient({ videoId }: Props) {
 
             <div className="rounded-xl border border-white/10 bg-slate-950/40 p-5">
               <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-                Previsioni e opinioni del soggetto
+                Punti citati nel video
               </p>
               <ul className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-relaxed text-slate-200/95 marker:text-fuchsia-400/80">
                 {mraReport.previsioni_principali?.length ? (
                   mraReport.previsioni_principali.map((p, i) => <li key={i}>{p}</li>)
                 ) : (
                   <li className="list-none pl-0 text-slate-500">
-                    Nessuna sintetizzabile dal testo.
+                    Nessuna previsione ricavata chiaramente dal testo.
                   </li>
                 )}
               </ul>
@@ -620,7 +904,7 @@ export function MraFlowClient({ videoId }: Props) {
 
             <div className="space-y-4">
               <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-                Per ticker (operazioni inverse MRA)
+                Titolo per titolo
               </p>
               {mraReport.per_ticker?.length ? (
                 mraReport.per_ticker.map((row) => (
@@ -663,22 +947,27 @@ export function MraFlowClient({ videoId }: Props) {
                 ))
               ) : (
                 <p className="rounded-xl border border-white/10 bg-slate-950/40 p-4 text-sm text-slate-500">
-                  Nessun blocco per ticker (array vuoto nel JSON).
+                  Nessun titolo con analisi per sezioni.
                 </p>
               )}
             </div>
 
-            <details className="group rounded-xl border border-white/10 bg-black/20">
-              <summary className="cursor-pointer select-none px-4 py-3 text-xs font-medium text-slate-400 transition group-open:border-b group-open:border-white/10 group-open:text-slate-300">
-                JSON completo
-              </summary>
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-[11px] leading-relaxed text-slate-400/95">
-                {JSON.stringify(mraReport, null, 2)}
-              </pre>
-            </details>
           </div>
         )}
       </section>
+
+      <MraArchiveSection
+        className="mt-10"
+        headingId="mra-archive-heading"
+        title="Le tue analisi salvate"
+        description="Apri una voce per rivedere tutto. Puoi eliminare quelle che non servono."
+        emptyHint="Ancora nulla qui. Dopo «Genera analisi», usa il pulsante Salva nell'archivio."
+        items={archiveItems}
+        loading={archiveLoading}
+        error={archiveError}
+        onDeleteArchive={deleteArchive}
+        deletingId={archiveDeletingId}
+      />
     </div>
   );
 }

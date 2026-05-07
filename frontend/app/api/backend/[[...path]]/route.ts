@@ -48,7 +48,7 @@ async function proxy(request: NextRequest, segmentPath: string) {
       headers: {
         "content-type": ct,
         "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, POST, OPTIONS",
+        "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
         "access-control-allow-headers": "Content-Type, Accept",
       },
     });
@@ -89,12 +89,16 @@ export async function POST(request: NextRequest, ctx: RouteParams) {
   return proxy(request, await segmentFromParams(ctx));
 }
 
+export async function DELETE(request: NextRequest, ctx: RouteParams) {
+  return proxy(request, await segmentFromParams(ctx));
+}
+
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
     headers: {
       "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
       "access-control-allow-headers": "Content-Type, Accept",
     },
   });

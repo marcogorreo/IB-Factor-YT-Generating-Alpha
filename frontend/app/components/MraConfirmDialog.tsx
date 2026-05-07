@@ -85,13 +85,11 @@ export function MraConfirmDialog({
               Market Reverse-Analysis (MRA)
             </p>
             <h2 className="mt-3 text-xl font-semibold tracking-tight text-white">
-              Confermi l&apos;avvio?
+              Avviare l&apos;analisi per questo video?
             </h2>
             <p className="mt-3 text-sm leading-relaxed text-slate-400">
-              Verrà eseguito il passo 1: estrazione del testo dai sottotitoli
-              YouTube (metodo gratuito, senza API a pagamento). Serve{" "}
-              <span className="text-slate-300">yt-dlp</span> installato sulla
-              macchina che esegue insights-service.
+              Prepariamo il testo dal video (sottotitoli). Poi potrai generare
+              l&apos;analisi MRA. La prima volta può richiedere qualche secondo.
             </p>
             {videoTitle && (
               <div className="mt-5 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3">
@@ -132,7 +130,7 @@ export function MraConfirmDialog({
                     Trascrizione…
                   </span>
                 ) : (
-                  "Conferma avvio MRA"
+                  "Conferma"
                 )}
               </button>
               <button
