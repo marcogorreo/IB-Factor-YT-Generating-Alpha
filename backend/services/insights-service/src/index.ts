@@ -4,16 +4,39 @@ import type { IncomingMessage } from "node:http";
 import { createServer } from "node:http";
 import { config as loadEnv } from "dotenv";
 
+import { ensureMraTranscriptSchema, getPool, upsertTranscript } from "./db/pool.js";
 import {
   anthropicChat,
   getAnthropicStatus,
   parseChatBody,
 } from "./llm/anthropic-chat.js";
+import { runMraAnalysisFromDb } from "./mra/mra-analyze.js";
+import { polishTranscriptText } from "./mra/caption-parse.js";
+import { extractYoutubeCaptions } from "./mra/yt-dlp-captions.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 loadEnv({ path: path.resolve(__dirname, "../../../../.env.local") });
 
 const port = Number(process.env.INSIGHTS_SERVICE_PORT) || 4001;
+
+let dbReady = false;
+
+async function initDb(): Promise<void> {
+  try {
+    const pool = getPool();
+    await ensureMraTranscriptSchema(pool);
+    dbReady = true;
+    console.log("[insights-service] schema mra_transcripts ok");
+  } catch (e) {
+    console.warn(
+      "[insights-service] DATABASE_URL assente o schema fallito — MRA trascrizioni disabilitate:",
+      e instanceof Error ? e.message : e,
+    );
+    dbReady = false;
+  }
+}
+
+void initDb();
 
 function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -35,29 +58,198 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
   });
 }
 
+function json(
+  res: import("node:http").ServerResponse,
+  status: number,
+  body: unknown,
+) {
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(body));
+}
+
+function parseTranscribeBody(raw: unknown): { video_id: string } {
+  if (!raw || typeof raw !== "object") {
+    const e = new Error("Body JSON con video_id richiesto");
+    (e as Error & { statusCode?: number }).statusCode = 400;
+    throw e;
+  }
+  const o = raw as Record<string, unknown>;
+  if (typeof o.video_id !== "string" || !o.video_id.trim()) {
+    const e = new Error('Campo "video_id" stringa obbligatoria');
+    (e as Error & { statusCode?: number }).statusCode = 400;
+    throw e;
+  }
+  return { video_id: o.video_id.trim() };
+}
+
 const server = createServer(async (req, res) => {
   const url = req.url ?? "/";
 
   if (req.method === "GET" && url === "/health") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(
-      JSON.stringify({
-        service: "insights-service",
-        status: "ok",
-      }),
-    );
+    json(res, 200, {
+      service: "insights-service",
+      status: "ok",
+      mra_transcripts_db: dbReady,
+    });
     return;
   }
 
   if (req.method === "GET" && url === "/insights/ping") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ message: "insights microservizio attivo" }));
+    json(res, 200, { message: "insights microservizio attivo" });
     return;
   }
 
   if (req.method === "GET" && url === "/insights/llm/status") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify(getAnthropicStatus()));
+    return;
+  }
+
+  if (req.method === "POST" && url === "/insights/mra/transcribe") {
+    if (!dbReady) {
+      json(res, 503, {
+        ok: false,
+        error: "database_unavailable",
+        message:
+          "Database non configurato o schema MRA non inizializzato. Verifica DATABASE_URL.",
+      });
+      return;
+    }
+    try {
+      const raw = await readJsonBody(req);
+      const { video_id } = parseTranscribeBody(raw);
+      const cap = await extractYoutubeCaptions(video_id);
+      const pool = getPool();
+      await upsertTranscript(pool, {
+        video_id,
+        transcript: cap.transcript,
+        source: "youtube_captions_ytdlp",
+        language: cap.language,
+      });
+      json(res, 200, {
+        ok: true,
+        video_id,
+        source: "youtube_captions_ytdlp",
+        language: cap.language,
+        subtitle_file: cap.subtitle_file,
+        characters: [...cap.transcript].length,
+        message:
+          "Trascrizione salvata (sottotitoli YouTube). Passo 1 MRA completato.",
+      });
+    } catch (e: unknown) {
+      if (e instanceof SyntaxError) {
+        json(res, 400, { ok: false, error: "invalid_json", message: e.message });
+        return;
+      }
+      const err = e as Error & { statusCode?: number };
+      const code = err.statusCode ?? 500;
+      json(res, code, {
+        ok: false,
+        error:
+          code === 404
+            ? "no_subtitles"
+            : code === 400
+              ? "bad_request"
+              : code === 503
+                ? "ytdlp_unavailable"
+                : "transcribe_error",
+        message: err.message,
+      });
+    }
+    return;
+  }
+
+  if (req.method === "GET" && url.startsWith("/insights/mra/transcript/")) {
+    if (!dbReady) {
+      json(res, 503, { ok: false, error: "database_unavailable" });
+      return;
+    }
+    const id = decodeURIComponent(url.slice("/insights/mra/transcript/".length));
+    if (!id || id.includes("..")) {
+      json(res, 400, { ok: false, error: "invalid_video_id" });
+      return;
+    }
+    try {
+      const pool = getPool();
+      const { rows } = await pool.query<{
+        video_id: string;
+        transcript: string;
+        language: string | null;
+        char_count: number;
+        updated_at: string;
+      }>(
+        `SELECT video_id, transcript, language, char_count, updated_at::text
+         FROM mra_transcripts WHERE video_id = $1`,
+        [id],
+      );
+      if (rows.length === 0) {
+        json(res, 404, { ok: false, error: "not_found" });
+        return;
+      }
+      const row = rows[0];
+      const transcript = polishTranscriptText(row.transcript);
+      json(res, 200, {
+        ok: true,
+        video_id: row.video_id,
+        transcript,
+        language: row.language,
+        char_count: [...transcript].length,
+        updated_at: row.updated_at,
+      });
+    } catch (e: unknown) {
+      json(res, 500, {
+        ok: false,
+        message: e instanceof Error ? e.message : "Errore lettura DB",
+      });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url === "/insights/mra/analyze") {
+    if (!dbReady) {
+      json(res, 503, {
+        ok: false,
+        error: "database_unavailable",
+        message: "Database non disponibile.",
+      });
+      return;
+    }
+    try {
+      const raw = await readJsonBody(req);
+      const { video_id } = parseTranscribeBody(raw);
+      const pool = getPool();
+      const result = await runMraAnalysisFromDb(pool, video_id);
+      json(res, 200, {
+        ok: true,
+        video_id,
+        analysis: result.analysis,
+        model: result.model,
+        usage: {
+          input_tokens: result.input_tokens,
+          output_tokens: result.output_tokens,
+        },
+        transcript_truncated: result.transcript_truncated,
+      });
+    } catch (e: unknown) {
+      if (e instanceof SyntaxError) {
+        json(res, 400, { ok: false, error: "invalid_json", message: e.message });
+        return;
+      }
+      const err = e as Error & { statusCode?: number };
+      const code = err.statusCode ?? 500;
+      json(res, code, {
+        ok: false,
+        error:
+          code === 404
+            ? "no_transcript"
+            : code === 503
+              ? "llm_unavailable"
+              : code === 502
+                ? "llm_upstream"
+                : "analyze_error",
+        message: err.message,
+      });
+    }
     return;
   }
 
@@ -100,8 +292,7 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  res.writeHead(404, { "content-type": "application/json" });
-  res.end(JSON.stringify({ error: "not_found" }));
+  json(res, 404, { error: "not_found" });
 });
 
 server.listen(port, () => {

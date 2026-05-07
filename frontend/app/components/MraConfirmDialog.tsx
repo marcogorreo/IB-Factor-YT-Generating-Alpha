@@ -6,14 +6,21 @@ type Props = {
   open: boolean;
   videoTitle: string | null;
   videoId: string | null;
+  /** Caricamento mentre parte la trascrizione (step 1 MRA). */
+  isConfirming: boolean;
+  /** Errore ultimo tentativo (visibile nel modale). */
+  step1Error: string | null;
   onClose: () => void;
-  onConfirm: () => void;
+  /** Risolto con successo → il dialog si chiude. In caso di errore, rilancia e resta aperto. */
+  onConfirm: () => void | Promise<void>;
 };
 
 export function MraConfirmDialog({
   open,
   videoTitle,
   videoId,
+  isConfirming,
+  step1Error,
   onClose,
   onConfirm,
 }: Props) {
@@ -39,9 +46,13 @@ export function MraConfirmDialog({
     return () => d.removeEventListener("close", onDialogClose);
   }, [onClose]);
 
-  const handleConfirm = () => {
-    onConfirm();
-    ref.current?.close();
+  const handleConfirm = async () => {
+    try {
+      await onConfirm();
+      ref.current?.close();
+    } catch {
+      /* errore mostrato dal parent; dialog resta aperto */
+    }
   };
 
   const btnBase =
@@ -77,8 +88,10 @@ export function MraConfirmDialog({
               Confermi l&apos;avvio?
             </h2>
             <p className="mt-3 text-sm leading-relaxed text-slate-400">
-              Stai per avviare una MRA sul video selezionato. Il motore di
-              analisi sarà disponibile nelle prossime versioni.
+              Verrà eseguito il passo 1: estrazione del testo dai sottotitoli
+              YouTube (metodo gratuito, senza API a pagamento). Serve{" "}
+              <span className="text-slate-300">yt-dlp</span> installato sulla
+              macchina che esegue insights-service.
             </p>
             {videoTitle && (
               <div className="mt-5 rounded-xl border border-white/10 bg-white/[0.04] px-4 py-3">
@@ -95,21 +108,41 @@ export function MraConfirmDialog({
                 )}
               </div>
             )}
+            {step1Error && (
+              <p
+                className="mt-4 rounded-lg border border-rose-500/30 bg-rose-950/40 px-3 py-2 text-sm leading-relaxed text-rose-100"
+                role="alert"
+              >
+                {step1Error}
+              </p>
+            )}
             <div className="mt-8 flex flex-col gap-3 sm:flex-row-reverse sm:justify-end">
               <button
                 type="button"
-                onClick={handleConfirm}
-                className={`${btnBase} min-w-[160px] bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500 px-5 text-white shadow-lg shadow-violet-500/30 hover:-translate-y-0.5 hover:scale-[1.02] hover:shadow-xl hover:shadow-fuchsia-500/35 hover:brightness-110 active:scale-[0.98] focus-visible:outline-cyan-400`}
+                disabled={isConfirming}
+                onClick={() => void handleConfirm()}
+                className={`${btnBase} min-w-[160px] bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500 px-5 text-white shadow-lg shadow-violet-500/30 hover:-translate-y-0.5 hover:scale-[1.02] hover:shadow-xl hover:shadow-fuchsia-500/35 hover:brightness-110 active:scale-[0.98] focus-visible:outline-cyan-400 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100`}
               >
-                Conferma avvio MRA
+                {isConfirming ? (
+                  <span className="flex items-center gap-2">
+                    <span
+                      className="size-4 animate-spin rounded-full border-2 border-white/30 border-t-white"
+                      aria-hidden
+                    />
+                    Trascrizione…
+                  </span>
+                ) : (
+                  "Conferma avvio MRA"
+                )}
               </button>
               <button
                 type="button"
+                disabled={isConfirming}
                 onClick={() => {
                   const d = ref.current;
                   if (d?.open) d.close();
                 }}
-                className={`${btnBase} border border-white/15 bg-white/5 px-5 font-medium text-slate-300 hover:-translate-y-px hover:scale-[1.01] hover:border-white/28 hover:bg-white/12 active:scale-[0.99] focus-visible:outline-slate-500`}
+                className={`${btnBase} border border-white/15 bg-white/5 px-5 font-medium text-slate-300 hover:-translate-y-px hover:scale-[1.01] hover:border-white/28 hover:bg-white/12 active:scale-[0.99] focus-visible:outline-slate-500 disabled:cursor-not-allowed disabled:opacity-50`}
               >
                 Annulla
               </button>

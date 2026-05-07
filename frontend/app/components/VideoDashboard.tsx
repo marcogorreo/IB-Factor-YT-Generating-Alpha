@@ -1,11 +1,14 @@
 "use client";
 
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 
 import { MraConfirmDialog } from "./MraConfirmDialog";
 
 const API = "/api/backend";
+
+const MRA_NAV_STORAGE = "mra_pending_nav";
 
 /** Tooltip sul pulsante: MRA + Soggetto Cramer */
 const MRA_TOOLTIP =
@@ -20,6 +23,15 @@ export type VideoItem = {
   channel_title: string | null;
   video_url: string;
   updated_at: string;
+};
+
+type MraNavPayload = {
+  video_id: string;
+  title: string;
+  thumbnail_url: string | null;
+  video_url: string;
+  published_at: string;
+  channel_title: string | null;
 };
 
 type Props = {
@@ -153,16 +165,24 @@ function MarketReverseAnalysisPanel() {
 }
 
 export function VideoDashboard({ initialVideos }: Props) {
+  const router = useRouter();
   const [videos, setVideos] = useState<VideoItem[]>(initialVideos);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [section, setSection] = useState<AppSection>("data-pool");
   const [mraDialogOpen, setMraDialogOpen] = useState(false);
   const [mraTarget, setMraTarget] = useState<VideoItem | null>(null);
+  const [mraTranscribing, setMraTranscribing] = useState(false);
+  const [mraBanner, setMraBanner] = useState<{
+    kind: "ok" | "err";
+    text: string;
+  } | null>(null);
+  const [mraStep1Error, setMraStep1Error] = useState<string | null>(null);
 
   const closeMraDialog = useCallback(() => {
     setMraDialogOpen(false);
     setMraTarget(null);
+    setMraTranscribing(false);
   }, []);
 
   const loadVideos = useCallback(async () => {
@@ -229,8 +249,56 @@ export function VideoDashboard({ initialVideos }: Props) {
   });
 
   const openMraForVideo = (video: VideoItem) => {
+    setMraBanner(null);
+    setMraStep1Error(null);
     setMraTarget(video);
     setMraDialogOpen(true);
+  };
+
+  const runMraTranscribe = async () => {
+    if (!mraTarget) return;
+    setMraStep1Error(null);
+    setMraTranscribing(true);
+    try {
+      const res = await fetch(`${API}/insights/mra/transcribe`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ video_id: mraTarget.video_id }),
+      });
+      const data = (await res.json()) as {
+        ok?: boolean;
+        message?: string;
+        characters?: number;
+      };
+      if (!res.ok) {
+        const msg =
+          typeof data.message === "string"
+            ? data.message
+            : "Trascrizione non riuscita.";
+        throw new Error(msg);
+      }
+      if (mraTarget && typeof window !== "undefined") {
+        sessionStorage.setItem(
+          MRA_NAV_STORAGE,
+          JSON.stringify({
+            video_id: mraTarget.video_id,
+            title: mraTarget.title,
+            thumbnail_url: mraTarget.thumbnail_url,
+            video_url: mraTarget.video_url,
+            published_at: mraTarget.published_at,
+            channel_title: mraTarget.channel_title,
+          } satisfies MraNavPayload),
+        );
+        router.push(`/mra/${encodeURIComponent(mraTarget.video_id)}`);
+      }
+    } catch (e: unknown) {
+      const msg =
+        e instanceof Error ? e.message : "Operazione non completata.";
+      setMraStep1Error(msg);
+      throw e;
+    } finally {
+      setMraTranscribing(false);
+    }
   };
 
   return (
@@ -239,10 +307,10 @@ export function VideoDashboard({ initialVideos }: Props) {
         open={mraDialogOpen}
         videoTitle={mraTarget?.title ?? null}
         videoId={mraTarget?.video_id ?? null}
+        isConfirming={mraTranscribing}
+        step1Error={mraStep1Error}
         onClose={closeMraDialog}
-        onConfirm={() => {
-          /* Backend MRA: prossimo step */
-        }}
+        onConfirm={runMraTranscribe}
       />
 
       <header className="sticky top-0 z-50 border-b border-white/10 bg-slate-950/75 backdrop-blur-xl">
@@ -336,6 +404,15 @@ export function VideoDashboard({ initialVideos }: Props) {
           </div>
         </div>
       </header>
+
+      {mraBanner?.kind === "ok" && (
+        <div
+          className="mx-auto max-w-6xl px-4 pb-4 sm:px-6 rounded-2xl border border-emerald-500/40 bg-emerald-950/50 py-3 text-sm text-emerald-100 backdrop-blur-sm"
+          role="status"
+        >
+          {mraBanner.text}
+        </div>
+      )}
 
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6 sm:py-10">
         {section === "data-pool" ? (
