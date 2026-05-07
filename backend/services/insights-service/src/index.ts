@@ -222,7 +222,7 @@ const server = createServer(async (req, res) => {
       json(res, 200, {
         ok: true,
         video_id,
-        analysis: result.analysis,
+        mra_report: result.mra_report,
         model: result.model,
         usage: {
           input_tokens: result.input_tokens,

@@ -1,4 +1,5 @@
 import { VideoDashboard, type VideoItem } from "./components/VideoDashboard";
+import { readApiJson } from "./lib/read-api-json";
 
 async function getInitialVideos(): Promise<VideoItem[]> {
   const base =
@@ -8,7 +9,7 @@ async function getInitialVideos(): Promise<VideoItem[]> {
       cache: "no-store",
     });
     if (!res.ok) return [];
-    const data = (await res.json()) as { videos?: VideoItem[] };
+    const data = await readApiJson<{ videos?: VideoItem[] }>(res);
     return data.videos ?? [];
   } catch {
     return [];

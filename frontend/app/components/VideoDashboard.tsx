@@ -4,6 +4,7 @@ import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useCallback, useState } from "react";
 
+import { readApiJson } from "../lib/read-api-json";
 import { MraConfirmDialog } from "./MraConfirmDialog";
 
 const API = "/api/backend";
@@ -191,15 +192,15 @@ export function VideoDashboard({ initialVideos }: Props) {
     if (!res.ok) {
       let detail = `Connessione non riuscita (codice ${res.status}).`;
       try {
-        const j = (await res.json()) as { message?: string; error?: string };
+        const j = await readApiJson<{ message?: string; error?: string }>(res);
         if (j.message) detail = j.message;
         else if (typeof j.error === "string") detail = j.error;
-      } catch {
-        /* ignora */
+      } catch (e) {
+        if (e instanceof Error) detail = e.message;
       }
       throw new Error(humanizeError(detail, "list"));
     }
-    const data = (await res.json()) as { videos: VideoItem[] };
+    const data = await readApiJson<{ videos: VideoItem[] }>(res);
     setVideos(data.videos ?? []);
   }, []);
 
@@ -212,11 +213,11 @@ export function VideoDashboard({ initialVideos }: Props) {
         headers: { "content-type": "application/json" },
         body: "{}",
       });
-      const data = (await res.json().catch(() => ({}))) as {
+      const data = await readApiJson<{
         videos?: VideoItem[];
         message?: string;
         error?: string;
-      };
+      }>(res);
       if (!res.ok) {
         const detail = data.message ?? data.error ?? `Errore ${res.status}`;
         throw new Error(humanizeError(String(detail), "refresh"));
@@ -234,7 +235,9 @@ export function VideoDashboard({ initialVideos }: Props) {
           raw.startsWith("Controlla") ||
           raw.startsWith("Si è verificato") ||
           raw.startsWith("L’archivio") ||
-          raw.startsWith("YouTube")
+          raw.startsWith("YouTube") ||
+          raw.startsWith("Risposta ") ||
+          raw.startsWith("JSON non valido")
           ? raw
           : humanizeError(raw, "refresh"),
       );
@@ -265,11 +268,11 @@ export function VideoDashboard({ initialVideos }: Props) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ video_id: mraTarget.video_id }),
       });
-      const data = (await res.json()) as {
+      const data = await readApiJson<{
         ok?: boolean;
         message?: string;
         characters?: number;
-      };
+      }>(res);
       if (!res.ok) {
         const msg =
           typeof data.message === "string"

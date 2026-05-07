@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { readApiJson } from "../lib/read-api-json";
 import {
   useCallback,
   useEffect,
@@ -23,12 +24,31 @@ export type MraNavMeta = {
   channel_title: string | null;
 };
 
+/** Output JSON dell'agent MRA (allineato al backend) */
+export type MraTickerRow = {
+  ticker: string;
+  orientamento_del_soggetto: string;
+  operazioni_suggerite: string;
+  motivazione: string;
+};
+
+export type MraAgentReport = {
+  video_id?: string;
+  generato_il?: string;
+  contesto_generale: string;
+  previsioni_principali: string[];
+  titoli_coinvolti: string[];
+  per_ticker: MraTickerRow[];
+};
+
 type TranscriptResponse = {
   ok?: boolean;
   transcript?: string;
   language?: string | null;
   char_count?: number;
   updated_at?: string;
+  message?: string;
+  error?: string;
 };
 
 /** Badge vetro / trasparente coerente con il tema */
@@ -150,7 +170,7 @@ export function MraFlowClient({ videoId }: Props) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingT, setLoadingT] = useState(true);
 
-  const [analysis, setAnalysis] = useState<string | null>(null);
+  const [mraReport, setMraReport] = useState<MraAgentReport | null>(null);
   const [analysisMeta, setAnalysisMeta] = useState<{
     model: string;
     truncated: boolean;
@@ -181,8 +201,11 @@ export function MraFlowClient({ videoId }: Props) {
         `${API}/insights/mra/transcript/${encodeURIComponent(videoId)}`,
         { cache: "no-store" },
       );
-      const data = (await res.json()) as TranscriptResponse;
+      const data = await readApiJson<TranscriptResponse>(res);
       if (!res.ok || !data.transcript) {
+        if (!res.ok && typeof data.message === "string") {
+          throw new Error(data.message);
+        }
         throw new Error(
           res.status === 404
             ? "Trascrizione non trovata. Torna al Data Pool ed esegui di nuovo «Esegui MRA»."
@@ -213,7 +236,7 @@ export function MraFlowClient({ videoId }: Props) {
   const runAnalysis = async () => {
     setAnalyzeError(null);
     setAnalyzing(true);
-    setAnalysis(null);
+    setMraReport(null);
     setAnalysisMeta(null);
     try {
       const res = await fetch(`${API}/insights/mra/analyze`, {
@@ -221,17 +244,17 @@ export function MraFlowClient({ videoId }: Props) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ video_id: videoId }),
       });
-      const data = (await res.json()) as {
+      const data = await readApiJson<{
         ok?: boolean;
-        analysis?: string;
+        mra_report?: MraAgentReport;
         model?: string;
         transcript_truncated?: boolean;
         message?: string;
-      };
-      if (!res.ok || !data.analysis) {
+      }>(res);
+      if (!res.ok || !data.mra_report) {
         throw new Error(data.message ?? "Analisi non disponibile.");
       }
-      setAnalysis(data.analysis);
+      setMraReport(data.mra_report);
       setAnalysisMeta({
         model: data.model ?? "",
         truncated: Boolean(data.transcript_truncated),
@@ -243,6 +266,19 @@ export function MraFlowClient({ videoId }: Props) {
     } finally {
       setAnalyzing(false);
     }
+  };
+
+  const downloadMraJson = () => {
+    if (!mraReport) return;
+    const blob = new Blob([JSON.stringify(mraReport, null, 2)], {
+      type: "application/json;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `mra-${videoId}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const title = meta?.title ?? `Video ${videoId}`;
@@ -277,9 +313,9 @@ export function MraFlowClient({ videoId }: Props) {
           Flusso MRA
         </h1>
         <p className="max-w-2xl text-sm text-slate-400">
-          Passo 1: trascrizione dal video. Passo 2: analisi strutturata con Claude
-          (sentiment, previsioni, spunto MRA). Non costituisce consulenza
-          finanziaria.
+          Passo 1: trascrizione dal video. Passo 2: l&apos;agent MRA produce un file
+          JSON con contesto, previsioni del soggetto, ticker e operatività inversa
+          (framework educativo, non consulenza finanziaria).
         </p>
       </header>
 
@@ -295,7 +331,7 @@ export function MraFlowClient({ videoId }: Props) {
         </li>
         <li
           className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 font-medium ${
-            analysis
+            mraReport
               ? "border-violet-500/35 bg-violet-500/10 text-violet-100"
               : "border-white/12 bg-white/[0.04] text-slate-400"
           }`}
@@ -468,31 +504,43 @@ export function MraFlowClient({ videoId }: Props) {
 
       <section className="rounded-2xl border border-violet-500/25 bg-violet-950/20 p-6 shadow-lg backdrop-blur-sm">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wider text-violet-300/90">
-          Passo 2 — Crea l&apos;analisi
+          Passo 2 — Agent MRA (output JSON)
         </h3>
         <p className="mb-6 text-sm leading-relaxed text-slate-400">
-          Genera un&apos;analisi MRA strutturata sulla base della trascrizione
-          (richiede chiave Anthropic configurata in <code className="text-slate-300">.env.local</code>
-          ).
+          L&apos;agent analizza la trascrizione e restituisce un unico oggetto JSON:
+          contesto, previsioni/opinioni del soggetto, ticker coinvolti e per ciascuno
+          operazioni concettualmente inverse (logica MRA) con motivazione. Richiede
+          chiave Anthropic in <code className="text-slate-300">.env.local</code>.
         </p>
-        <button
-          type="button"
-          disabled={Boolean(!transcript || loadingT || analyzing)}
-          onClick={() => void runAnalysis()}
-          className="inline-flex h-11 items-center justify-center rounded-xl bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500 px-6 text-sm font-semibold text-white shadow-lg shadow-violet-500/25 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45"
-        >
-          {analyzing ? (
-            <span className="flex items-center gap-2">
-              <span
-                className="size-4 animate-spin rounded-full border-2 border-white/30 border-t-white"
-                aria-hidden
-              />
-              Generazione in corso…
-            </span>
-          ) : (
-            "Genera analisi MRA"
-          )}
-        </button>
+        <div className="flex flex-wrap gap-3">
+          <button
+            type="button"
+            disabled={Boolean(!transcript || loadingT || analyzing)}
+            onClick={() => void runAnalysis()}
+            className="inline-flex h-11 flex-1 items-center justify-center rounded-xl bg-gradient-to-r from-violet-500 via-fuchsia-500 to-cyan-500 px-6 text-sm font-semibold text-white shadow-lg shadow-violet-500/25 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-45 min-[380px]:flex-initial"
+          >
+            {analyzing ? (
+              <span className="flex items-center gap-2">
+                <span
+                  className="size-4 animate-spin rounded-full border-2 border-white/30 border-t-white"
+                  aria-hidden
+                />
+                Generazione in corso…
+              </span>
+            ) : (
+              "Esegui agent MRA"
+            )}
+          </button>
+          {mraReport ? (
+            <button
+              type="button"
+              onClick={downloadMraJson}
+              className="inline-flex h-11 items-center justify-center rounded-xl border border-white/15 bg-white/[0.06] px-5 text-sm font-semibold text-slate-100 backdrop-blur-sm transition hover:bg-white/[0.1]"
+            >
+              Scarica JSON
+            </button>
+          ) : null}
+        </div>
         {analyzeError && (
           <p
             className="mt-4 rounded-lg border border-rose-500/30 bg-rose-950/40 px-3 py-2 text-sm text-rose-100"
@@ -501,9 +549,19 @@ export function MraFlowClient({ videoId }: Props) {
             {analyzeError}
           </p>
         )}
-        {analysis && (
-          <div className="mt-6 space-y-3">
+        {mraReport && (
+          <div className="mt-6 space-y-6">
             <div className="flex flex-wrap gap-2 text-xs text-slate-500">
+              {mraReport.video_id && (
+                <span className="rounded-full bg-white/10 px-2 py-0.5 font-mono">
+                  {mraReport.video_id}
+                </span>
+              )}
+              {mraReport.generato_il && (
+                <span className="rounded-full bg-white/10 px-2 py-0.5">
+                  {new Date(mraReport.generato_il).toLocaleString("it-IT")}
+                </span>
+              )}
               {analysisMeta?.model && (
                 <span className="rounded-full bg-white/10 px-2 py-0.5">
                   Modello: {analysisMeta.model}
@@ -515,11 +573,109 @@ export function MraFlowClient({ videoId }: Props) {
                 </span>
               )}
             </div>
-            <div className="rounded-xl border border-white/10 bg-slate-950/50 p-4 text-sm leading-relaxed text-slate-200">
-              <pre className="whitespace-pre-wrap font-sans text-[13px]">
-                {analysis}
-              </pre>
+
+            <div className="rounded-xl border border-white/10 bg-slate-950/40 p-5">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Contesto generale
+              </p>
+              <p className="mt-2 text-sm leading-relaxed text-slate-200/95">
+                {mraReport.contesto_generale}
+              </p>
             </div>
+
+            <div className="rounded-xl border border-white/10 bg-slate-950/40 p-5">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Previsioni e opinioni del soggetto
+              </p>
+              <ul className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-relaxed text-slate-200/95 marker:text-fuchsia-400/80">
+                {mraReport.previsioni_principali?.length ? (
+                  mraReport.previsioni_principali.map((p, i) => <li key={i}>{p}</li>)
+                ) : (
+                  <li className="list-none pl-0 text-slate-500">
+                    Nessuna sintetizzabile dal testo.
+                  </li>
+                )}
+              </ul>
+            </div>
+
+            <div className="rounded-xl border border-white/10 bg-slate-950/40 p-5">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Titoli coinvolti
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {mraReport.titoli_coinvolti?.length ? (
+                  mraReport.titoli_coinvolti.map((t) => (
+                    <span
+                      key={t}
+                      className="rounded-lg border border-cyan-500/25 bg-cyan-500/10 px-2.5 py-1 font-mono text-xs font-medium text-cyan-100/90"
+                    >
+                      {t}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-sm text-slate-500">Nessun ticker indicato.</span>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Per ticker (operazioni inverse MRA)
+              </p>
+              {mraReport.per_ticker?.length ? (
+                mraReport.per_ticker.map((row) => (
+                  <div
+                    key={row.ticker}
+                    className="overflow-hidden rounded-xl border border-violet-500/20 bg-gradient-to-br from-slate-950/90 to-violet-950/30"
+                  >
+                    <div className="border-b border-white/10 bg-white/[0.04] px-4 py-2.5">
+                      <span className="font-mono text-sm font-semibold text-fuchsia-200/95">
+                        {row.ticker}
+                      </span>
+                    </div>
+                    <div className="space-y-3 p-4 text-sm">
+                      <div>
+                        <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                          Orientamento del soggetto
+                        </p>
+                        <p className="mt-1 leading-relaxed text-slate-300/95">
+                          {row.orientamento_del_soggetto}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                          Operazioni suggerite (inverso MRA)
+                        </p>
+                        <p className="mt-1 leading-relaxed text-emerald-100/90">
+                          {row.operazioni_suggerite}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                          Motivazione
+                        </p>
+                        <p className="mt-1 leading-relaxed text-slate-300/95">
+                          {row.motivazione}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="rounded-xl border border-white/10 bg-slate-950/40 p-4 text-sm text-slate-500">
+                  Nessun blocco per ticker (array vuoto nel JSON).
+                </p>
+              )}
+            </div>
+
+            <details className="group rounded-xl border border-white/10 bg-black/20">
+              <summary className="cursor-pointer select-none px-4 py-3 text-xs font-medium text-slate-400 transition group-open:border-b group-open:border-white/10 group-open:text-slate-300">
+                JSON completo
+              </summary>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-[11px] leading-relaxed text-slate-400/95">
+                {JSON.stringify(mraReport, null, 2)}
+              </pre>
+            </details>
           </div>
         )}
       </section>
